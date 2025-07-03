@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import numpy as np
 import warnings
 from scipy.special import softmax
@@ -157,6 +158,7 @@ class FeatureDependentMarkovChain():
                                    W_lap_states=None, W_lap_features=None, **kwargs):
         """Logistic regression with mini-batch processing"""
         torch.set_default_dtype(torch.double)
+        device = torch.device('cuda') 
         
         m = Xs[0].shape[1]
 
@@ -193,8 +195,8 @@ class FeatureDependentMarkovChain():
         # Use LBFGS for better convergence with full batches
         opt = torch.optim.LBFGS(As + bs, max_iter=50, tolerance_grad=1e-8, 
                                line_search_fn='strong_wolfe')
-        loss_fn = torch.nn.KLDivLoss(reduction='none')
-        lsm = torch.nn.LogSoftmax(dim=1)
+        loss_fn = F.KLDivLoss(reduction='none')
+        lsm = F.LogSoftmax(dim=1)
 
         def loss():
             opt.zero_grad()
