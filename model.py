@@ -5,6 +5,10 @@ import warnings
 from scipy.special import softmax
 from utils import to_dataset, to_dataset_ignore_na
 
+torch.set_default_dtype(torch.double)
+device = torch.device("cuda")
+torch.set_default_device(device)
+
 class FeatureDependentMarkovChain():
     def __init__(self, num_states, mask=None, lam_frob=0.1, W_lap_states=None,
                  W_lap_features=None, lam_col_norm=0.0, eps=1e-6, n_iter=50, 
@@ -157,25 +161,23 @@ class FeatureDependentMarkovChain():
     def _logistic_regression_batched(self, ws, Xs, Ys, lam, warm_start=False,
                                    W_lap_states=None, W_lap_features=None, **kwargs):
         """Logistic regression with mini-batch processing"""
-        torch.set_default_dtype(torch.double)
-        device = torch.device('cuda') 
         
         m = Xs[0].shape[1]
 
         if warm_start and hasattr(self, "As") and hasattr(self, "bs"):
-            As = [torch.from_numpy(A.copy()) for A in self.As]
-            bs = [torch.from_numpy(b.copy()) for b in self.bs]
+            As = [torch.from_numpy(A.copy()).to(device) for A in self.As]
+            bs = [torch.from_numpy(b.copy()).to(device) for b in self.bs]
             for A, b in zip(As, bs):
                 A.requires_grad_(True)
                 b.requires_grad_(True)
         else:
-            As = [torch.zeros(m, Ys[i].shape[1], requires_grad=True) for i in range(self.n)]
-            bs = [torch.zeros(Ys[i].shape[1], requires_grad=True) for i in range(self.n)]
+            As = [torch.zeros(m, Ys[i].shape[1], requires_grad=True).to(device) for i in range(self.n)]
+            bs = [torch.zeros(Ys[i].shape[1], requires_grad=True).to(device) for i in range(self.n)]
 
         # Convert to tensors once
-        ws_tensor = [torch.from_numpy(w) for w in ws]
-        Xs_tensor = [torch.from_numpy(X) for X in Xs]
-        Ys_tensor = [torch.from_numpy(Y) for Y in Ys]
+        ws_tensor = [torch.from_numpy(w).to(device) for w in ws]
+        Xs_tensor = [torch.from_numpy(X).to(device) for X in Xs]
+        Ys_tensor = [torch.from_numpy(Y).to(device) for Y in Ys]
         
         total_weight = sum([w.sum().item() for w in ws_tensor])
 
@@ -195,8 +197,8 @@ class FeatureDependentMarkovChain():
         # Use LBFGS for better convergence with full batches
         opt = torch.optim.LBFGS(As + bs, max_iter=50, tolerance_grad=1e-8, 
                                line_search_fn='strong_wolfe')
-        loss_fn = F.KLDivLoss(reduction='none')
-        lsm = F.LogSoftmax(dim=1)
+        # loss_fn = F.kl_div(reduction='none')
+        # lsm = F.log_softmax(dim=1)
 
         def loss():
             opt.zero_grad()
@@ -207,8 +209,8 @@ class FeatureDependentMarkovChain():
                 if len(ws_tensor[i]) == 0:
                     continue
                 
-                pred = lsm(Xs_tensor[i] @ As[i] + bs[i])
-                l += (loss_fn(pred, Ys_tensor[i]).sum(axis=1) * ws_tensor[i]).sum() / total_weight
+                pred = F.log_softmax(Xs_tensor[i] @ As[i] + bs[i], dim=1)
+                l += (F.kl_div(pred, Ys_tensor[i], reduction='none').sum(axis=1) * ws_tensor[i]).sum() / total_weight
                 l += lam * As[i].pow(2).sum()
             
             # Add Laplacian regularization
@@ -220,8 +222,9 @@ class FeatureDependentMarkovChain():
 
         opt.step(loss)
 
-        A_numpy = [A.detach().numpy() for A in As]
-        b_numpy = [b.detach().numpy() for b in bs]
+        # https://stackoverflow.com/questions/75064656/printing-pytorch-tensor-from-gpu-or-move-to-cpu-and-or-detach
+        A_numpy = [A.detach().cpu().numpy() for A in As]
+        b_numpy = [b.detach().cpu().numpy() for b in bs]
         return (A_numpy, b_numpy, loss().item())
 
     def _mini_batch_training(self, As, bs, ws_tensor, Xs_tensor, Ys_tensor,
@@ -243,7 +246,7 @@ class FeatureDependentMarkovChain():
                     continue
                     
                 n_samples = len(ws_tensor[i])
-                indices = torch.randperm(n_samples)
+                indices = torch.randperm(n_samples, device=device)
                 
                 for batch_start in range(0, n_samples, self.mini_batch_size):
                     batch_end = min(batch_start + self.mini_batch_size, n_samples)
@@ -284,8 +287,9 @@ class FeatureDependentMarkovChain():
         final_loss = self._compute_full_loss(As, bs, ws_tensor, Xs_tensor, Ys_tensor, 
                                            lam, W_lap_states, W_lap_features, total_weight)
 
-        A_numpy = [A.detach().numpy() for A in As]
-        b_numpy = [b.detach().numpy() for b in bs]
+        # https://stackoverflow.com/questions/75064656/printing-pytorch-tensor-from-gpu-or-move-to-cpu-and-or-detach
+        A_numpy = [A.detach().cpu().numpy() for A in As]
+        b_numpy = [b.detach().cpu().numpy() for b in bs]
         return (A_numpy, b_numpy, final_loss)
 
     def _compute_laplacian_reg(self, As, bs, W_lap_states, W_lap_features):
